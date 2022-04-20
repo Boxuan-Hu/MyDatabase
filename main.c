@@ -68,6 +68,12 @@ typedef struct {
     Pager* pager;
 } Table;
 
+typedef struct {
+  Table* table;
+  uint32_t row_num;
+  bool end_of_table;  // Indicates a position one past the last element
+} Cursor;
+
 // get page from cache, if null, retrieve page from disk
 void* get_page(Pager* pager, uint32_t page_num) {
   if (page_num > TABLE_MAX_PAGES) {
@@ -101,12 +107,38 @@ void* get_page(Pager* pager, uint32_t page_num) {
   return pager->pages[page_num];
 }
 
-void* row_slot(Table* table, uint32_t row_num) {
-    uint32_t page_num = row_num / ROWS_PER_PAGE;
-    void* page = get_page(table->pager, page_num);
-    uint32_t row_offset = row_num % ROWS_PER_PAGE;
-    uint32_t byte_offset = row_offset * ROW_SIZE;
-    return page + byte_offset;
+Cursor* table_start(Table* table) {
+  Cursor* cursor = malloc(sizeof(Cursor));
+  cursor->table = table;
+  cursor->row_num = 0;
+  cursor->end_of_table = (table->num_rows == 0);
+
+  return cursor;
+}
+
+Cursor* table_end(Table* table) {
+  Cursor* cursor = malloc(sizeof(Cursor));
+  cursor->table = table;
+  cursor->row_num = table->num_rows;
+  cursor->end_of_table = true;
+
+  return cursor;
+}
+
+void* cursor_value(Cursor* cursor) {
+  uint32_t row_num = cursor->row_num;
+  uint32_t page_num = row_num / ROWS_PER_PAGE;
+  void *page = get_page(cursor->table->pager, page_num);
+  uint32_t row_offset = row_num % ROWS_PER_PAGE;
+  uint32_t byte_offset = row_offset * ROW_SIZE;
+  return page + byte_offset;
+}
+
+void cursor_advance(Cursor* cursor) {
+  cursor->row_num += 1;
+  if (cursor->row_num >= cursor->table->num_rows) {
+    cursor->end_of_table = true;
+  }
 }
 
 void serialize_row(Row* source, void* destination) {
@@ -132,7 +164,7 @@ InputBuffer* new_input_buffer(void) {
 void print_prompt(void) {printf("db > ");}
 //ssize_t getline(char **lineptr, size_t *n, FILE *stream);
 
-void print_row(Row* row, Table* t) {
+void print_row(Row* row) {
     printf("(%d, %s, %s)\n", row->id, row->username, row->email);
 }
 
@@ -200,8 +232,6 @@ void pager_flush(Pager* pager, uint32_t page_num, uint32_t size) {
     exit(EXIT_FAILURE);
   }
 }
-
-
 
 Table* db_open(const char* filename) {
     Pager* pager = pager_open(filename);
@@ -308,21 +338,32 @@ PrepareResult prepare_statment(InputBuffer* input_buffer, Statement* statement) 
     return PREPARE_UNRECOGNIZED_STATEMENT;
 }
 
+
+
 ExecuteResult execute_insert(Statement* statement, Table* table) {
     if (table->num_rows >= TABLE_MAX_ROWS) {
         return EXECUTE_TABLE_FULL;
     }
     Row* row_to_insert = &(statement->row_to_insert);
-    serialize_row(row_to_insert, row_slot(table, table->num_rows));
+    Cursor* cursor = table_end(table);
+    serialize_row(row_to_insert, cursor_value(cursor));
     table->num_rows += 1;
+    free(cursor);
     return EXECUTE_SUCCESS;
 }
 
 ExecuteResult execute_select(Statement* statement, Table* table) {
   Row row;
   for (uint32_t i = 0; i < table->num_rows; i++) {
-    deserialize_row(row_slot(table, i), &row);
-    print_row(&row, table);
+      Cursor* cursor = table_start(table);
+      Row row;
+      while (!(cursor->end_of_table)) {
+          deserialize_row(cursor_value(cursor), &row);
+          print_row(&row);
+          cursor_advance(cursor);
+      }
+      free(cursor);
+      
   }
   return EXECUTE_SUCCESS;
 }
@@ -335,7 +376,6 @@ ExecuteResult execute_statement(Statement* statement, Table* table) {
             return execute_select(statement, table);
     }
 }
-
 
 
 
